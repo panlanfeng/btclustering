@@ -1,4 +1,4 @@
-module btclustering 
+module DecisionTree
 
 import Base.length, Base.convert, Base.promote_rule, Base.show, Rmath.qf
 
@@ -6,13 +6,13 @@ export Leaf, Node, print_tree, Tree2Collection, Tree2Centers, ss, ss_by_col, RSq
        build_stump, build_tree, prune_tree, apply_tree, nfoldCV_tree,
        build_forest, apply_forest, nfoldCV_forest,
        build_adaboost_stumps, apply_adaboost_stumps, nfoldCV_stumps,
-       summary_vote, ConfusionMatrix, confusion_matrix
+       majority_vote, ConfusionMatrix, confusion_matrix
 
 include("measures.jl")
 #include("Clustering.jl")
 
 type Leaf
-    summary::Any
+    majority::Any
     values::Vector
 end
 
@@ -34,9 +34,9 @@ end
 
 function print_tree(tree::Union(Leaf,Node), indent::Integer)
     if typeof(tree) == Leaf
-        matches = find(tree.values .== tree.summary)
+        matches = find(tree.values .== tree.majority)
         ratio = string(length(matches)) * "/" * string(length(tree.values))
-        println("$(tree.summary) : $(ratio)")
+        println("$(tree.majority) : $(ratio)")
     else
         println("Feature $(tree.featid), Threshold $(tree.featval)")
         print("    " ^ indent * "L-> ")
@@ -83,13 +83,13 @@ end
 function build_stump(labels::Vector, features::Matrix, weights::Vector)
     S = _split(labels, features, 0, weights)
     if S == None
-        return Leaf(summary_vote(labels), labels)
+        return Leaf(majority_vote(labels), labels)
     end
     id, thresh = S
     split = features[:,id] .< thresh
     return Node(id, thresh,
-                Leaf(summary_vote(labels[split]), labels[split]),
-                Leaf(summary_vote(labels[!split]), labels[!split]))
+                Leaf(majority_vote(labels[split]), labels[split]),
+                Leaf(majority_vote(labels[!split]), labels[!split]))
 end
 build_stump(labels::Vector, features::Matrix) = build_stump(labels, features, [0])
 
@@ -98,7 +98,7 @@ build_stump(labels::Vector, features::Matrix) = build_stump(labels, features, [0
 function build_tree(labels::Vector, features::Matrix, nsubfeatures::Integer)
     S = _split(labels, features, nsubfeatures, [0])
     if S == None
-        return Leaf(summary_vote(labels), labels)
+        return Leaf(majority_vote(labels), labels)
     end
     id, thresh = S
     split = features[:,id] .< thresh
@@ -134,11 +134,11 @@ function prune_tree(tree::Union(Leaf,Node), purity_thresh::Real)
             return tree
         elseif N == 2    ## a stump
             all_labels = [tree.left.values, tree.right.values]
-            summary = summary_vote(all_labels)
-            matches = find(all_labels .== summary)
+            majority = majority_vote(all_labels)
+            matches = find(all_labels .== majority)
             purity = length(matches) / length(all_labels)
             if purity >= purity_thresh
-                return Leaf(summary, all_labels)
+                return Leaf(majority, all_labels)
             else
                 return tree
             end
@@ -160,7 +160,7 @@ prune_tree(tree::Union(Leaf,Node)) = prune_tree(tree, 1.0) ## defaults to 100% p
 
 function apply_tree(tree::Union(Leaf,Node), features::Vector)
     if typeof(tree) == Leaf
-        return tree.summary
+        return tree.majority
     elseif tree.featval == nothing
         return apply_tree(tree.left, features)
     elseif features[tree.featid] < tree.featval
@@ -195,7 +195,7 @@ function apply_forest{T<:Union(Leaf,Node)}(forest::Vector{T}, features::Vector)
     for i in 1:ntrees
         votes[i] = apply_tree(forest[i],features)
     end
-    return summary_vote(votes)
+    return majority_vote(votes)
 end
 
 function apply_forest{T<:Union(Leaf,Node)}(forest::Vector{T}, features::Matrix)
@@ -260,7 +260,7 @@ end
 #####################################################
 
 # my _split
-function _split{T <: FloatingPoint, V <: FloatingPoint}(responses::Matrix{T}, features::Matrix{V}, nsubfeatures::Integer)
+function _split(responses::Matrix, features::Matrix, nsubfeatures::Integer)
     nf = size(features,2)
     (nobs, nresponses) = size(responses)
     best = None
@@ -271,7 +271,7 @@ function _split{T <: FloatingPoint, V <: FloatingPoint}(responses::Matrix{T}, fe
     else
         inds = [1:nf]
     end
-    sum_total = mapslices(sum, responses, 1)
+    sum_total = reshape(mapslices(sum, responses, 1), nresponses)
     for i in 1:nf
         domain_i = sort(unique(features[:,inds[i]]))
         if length(domain_i) < 2
@@ -279,15 +279,15 @@ function _split{T <: FloatingPoint, V <: FloatingPoint}(responses::Matrix{T}, fe
         end
         member_in_left = falses(nobs)
         size_in_left = 0
-        sum_in_left = zeros(eltype(sum_total), (1, nresponses))
+        sum_in_left = zeros(eltype(sum_total), nresponses)
         for d in domain_i[2:]
             tmp = features[:, inds[i]] .< d
             new_member_in_left = (!member_in_left) & tmp
             member_in_left = copy(tmp)
             size_in_left = sum(member_in_left)
             
-            sum_new = mapslices(sum, responses[new_member_in_left, :], 1)
-            sum_in_left = sum_in_left .+ sum_new
+            sum_new = reshape(mapslices(sum, responses[new_member_in_left, :], 1), nresponses)
+            sum_in_left += sum_new
             value = sum((sum_in_left) .^ 2) / size_in_left + sum((sum_total .- sum_in_left) .^ 2) / (nobs - size_in_left) 
             
             if value > best_val
@@ -299,39 +299,11 @@ function _split{T <: FloatingPoint, V <: FloatingPoint}(responses::Matrix{T}, fe
     return best
 end
 
-#my _split for category data
-function _split{T <: Integer, V <: Integer}(responses::Matrix{T}, features::Matrix{V}, nsubfeatures::Integer)
-    nf = size(features,2)
-    best = None
-    best_val = -Inf
-    if nsubfeatures > 0
-        inds = randperm(nf)[1:nsubfeatures]
-        nf = nsubfeatures
-    else
-        inds = [1:nf]
-    end
-    for i in 1:nf
-        domain_i = sort(unique(features[:,inds[i]]))
-        if(length(domain_i) < 2)
-            continue
-        end
-        for d in domain_i
-            
-            value = ss_ratio(responses, features[:, inds[i]] .== d)
-            
-            if value > best_val
-                best_val = value
-                best = (inds[i], d)
-            end
-        end
-    end
-    return best
-end
 
 
 
 #My build_stump 
-function build_stump{T <: Real, V <: Real}(responses::Matrix{T}, row_no::Vector{Integer}, features::Matrix{V})
+function build_stump(responses::Matrix, row_no::Vector, features::Matrix)
     S = _split(responses, features, 0)
     (nobs, nresponses) = size(responses)
     if S == None
@@ -346,7 +318,7 @@ end
 
 
 #my own build_tree
-function build_tree{T <: FloatingPoint, V <: FloatingPoint}(responses::Matrix{T}, row_no::Vector, features::Matrix{V}, nsubfeatures::Integer, max_leaf_size::Integer)
+function build_tree(responses::Matrix, row_no::Vector, features::Matrix, nsubfeatures::Integer, max_leaf_size::Integer)
      S = _split(responses, features, 0)
     (nobs, nresponses) = size(responses)
     if S == None
@@ -377,43 +349,12 @@ function build_tree{T <: FloatingPoint, V <: FloatingPoint}(responses::Matrix{T}
     end
 end
 
-function build_tree{T <: Integer, V <: Integer}(responses::Matrix{T}, row_no::Vector, features::Matrix{V}, nsubfeatures::Integer, max_leaf_size::Integer)
-     S = _split(responses, features, 0)
-    (nobs, nresponses) = size(responses)
-    if S == None
-        return Leaf(0, row_no)
-    end
-    id, thresh = S
-    split = features[:,id] .==  thresh
-    row_no_left = row_no[split]
-    row_no_right = row_no[!split]
-    pure_left = length(row_no_left) < max_leaf_size
-    pure_right = length(row_no_right) < max_leaf_size
-    if pure_right && pure_left
-        return Node(id, thresh,
-                    Leaf(0, row_no_left),
-                    Leaf(0, row_no_right))
-    elseif pure_left
-        return Node(id, thresh,
-                    Leaf(0, row_no_left),
-                    build_tree(responses[!split, :],row_no_right, features[!split,:], nsubfeatures, max_leaf_size))
-    elseif pure_right
-        return Node(id, thresh,
-                    build_tree(responses[split, :],row_no_left, features[split,:], nsubfeatures, max_leaf_size),
-                    Leaf(0, row_no_right))
-    else
-        return Node(id, thresh,
-                    build_tree(responses[split, :],row_no_left, features[split,:], nsubfeatures, max_leaf_size),
-                    build_tree(responses[!split, :],row_no_right, features[!split,:], nsubfeatures, max_leaf_size))
-    end
-end
-    
 
 #my own prune_tree
 
 
-function prune_tree{T <: FloatingPoint}(tree::Union(Leaf,Node), imp_thresh::Float64, responses::Matrix{T})
-    function _prune_run{T <: FloatingPoint}(tree::Union(Leaf,Node), imp_thresh::Float64, responses::Matrix{T})
+function prune_tree(tree::Union(Leaf,Node), imp_thresh::Float64, responses::Matrix)
+    function _prune_run(tree::Union(Leaf,Node), imp_thresh::Float64, responses::Matrix)
         N = length(tree)
         if N == 1        ## a Leaf
             return tree
@@ -422,7 +363,7 @@ function prune_tree{T <: FloatingPoint}(tree::Union(Leaf,Node), imp_thresh::Floa
             all_no = [tree.left.values, tree.right.values]
             all_ss = ss_by_col(responses[all_no, :])
 
-            imp = all_ss / (tree.left.summary + tree.right.summary) - 1
+            imp = all_ss / (tree.left.majority + tree.right.majority) - 1
             if imp <= qf(imp_thresh, 1, length(all_no)) 
                 println(imp)
                 return Leaf(all_ss, all_no)
@@ -444,39 +385,13 @@ function prune_tree{T <: FloatingPoint}(tree::Union(Leaf,Node), imp_thresh::Floa
 end
 
 
-function prune_tree{T <: Integer}(tree::Union(Leaf,Node), imp_thresh::Float64, responses::Matrix{T})
-    function _prune_run{T <: Integer}(tree::Union(Leaf,Node), imp_thresh::Float64, responses::Matrix{T})
-        N = length(tree)
-        if N == 1        ## a Leaf
-            return tree
-        elseif N == 2    ## a stump
-
-            all_no = [tree.left.values, tree.right.values]
-            split = falses(length(all_no))
-            split[1:length(tree.left.values)] = true
-            all_ss = ss_ratio(responses[all_no, :], split) 
-
-            imp = all_ss / (1 - all_ss)
-            if imp <= qf(imp_thresh, 1, length(table(all_no)) - 1) 
-                println(imp)
-                return Leaf(all_ss, all_no)
-            else
-                return tree
-            end
-        else
-            return Node(tree.featid, tree.featval,
-                        _prune_run(tree.left, imp_thresh, responses),
-                        _prune_run(tree.right, imp_thresh, responses))
-        end
-    end
-    pruned = _prune_run(tree, imp_thresh, responses)
-    while length(pruned) < length(tree)
-        tree = pruned
-        pruned = _prune_run(tree, imp_thresh, responses)
-    end
-    return pruned
+function ss{T <: Real}(y::Array{T})
+        y | x -> (x .- mean(x)) .^ 2 | sum
 end
 
+function ss_by_col(responses::Matrix)
+    mapslices(ss, responses, 1) | sum
+end
 
 
 function Tree2Collection(tree::Union(Leaf, Node), coll::Array{Any, 1})
@@ -489,7 +404,7 @@ function Tree2Collection(tree::Union(Leaf, Node), coll::Array{Any, 1})
     coll
 end
 
-function Tree2Centers{T <: Real}(tree::Union(Leaf, Node), responses::Matrix{T})
+function Tree2Centers(tree::Union(Leaf, Node), responses::Matrix)
     mycoll = Tree2Collection(tree, {})
 
     centers = similar(responses, (length(mycoll), size(responses, 2)))
@@ -499,9 +414,9 @@ function Tree2Centers{T <: Real}(tree::Union(Leaf, Node), responses::Matrix{T})
     centers
 end
 
-function RSquare{T <: Real}(tree::Union(Leaf, Node), responses::Matrix{T}, rsquare::Array{Float64, 1})
+function RSquare(tree::Union(Leaf, Node), responses::Matrix, rsquare::Array{Float64, 1})
     if typeof(tree) == Leaf    
-        rsquare[1] += ss_by_col(responses[tree.values, :]) 
+        rsquare[1] += tree.majority
     else
         RSquare(tree.left, responses, rsquare)
         RSquare(tree.right, responses, rsquare)
