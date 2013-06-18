@@ -2,7 +2,12 @@ btclustering.jl is licensed under the MIT License:
 
 > Code is adapted from Julia Package DecisionTree
 > Copyright (c) 2012-2013, Ben Sadeghi
+> As author of DecisionTree says,
+> The package DecisionTree is originally adapted from MILK: Machine Learning Toolkit 
+> Copyright (c) 2008-2011, Luis Pedro Coelho luis@luispedro.org 
+> License: MIT. See COPYING.MIT file in the milk distribution
 >
+> 
 > Copyright (c) 2013-2014, Lanfeng Pan  
 >
 > Permission is hereby granted, free of charge, to any person obtaining
